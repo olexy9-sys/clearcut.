@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ClearCut — Fast Background Remover</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif;background:#080b14;color:#f5f7ff}
+.wrap{max-width:1100px;margin:auto;padding:28px 18px 60px}.hero{text-align:center;padding:35px 10px}
+h1{font-size:clamp(34px,6vw,64px);margin:0;background:linear-gradient(90deg,#8b7cff,#38d9ff);-webkit-background-clip:text;color:transparent}
+.hero p{color:#aeb7cc;font-size:17px}.card{background:#101625;border:1px solid #222c40;border-radius:22px;padding:22px;box-shadow:0 18px 60px #0005}
+.drop{border:2px dashed #3d4b68;border-radius:18px;padding:38px 20px;text-align:center;cursor:pointer;transition:.2s}
+.drop:hover,.drop.drag{border-color:#7c6cff;background:#171d30}.drop strong{display:block;font-size:20px}.drop span{display:block;color:#9ca8bd;margin-top:8px}
+input{display:none}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}
+button{border:0;border-radius:12px;padding:12px 17px;background:#7465ff;color:white;font-weight:700;cursor:pointer}button.secondary{background:#202a3d}button:disabled{opacity:.45;cursor:not-allowed}
+.stats{display:flex;justify-content:space-between;gap:10px;margin:20px 0 10px;color:#b8c2d6}.bar{height:10px;background:#202a3d;border-radius:99px;overflow:hidden}.fill{height:100%;width:0;background:linear-gradient(90deg,#7465ff,#35d7ff);transition:width .2s}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:14px;margin-top:20px}.item{background:#0c111d;border:1px solid #202a3d;border-radius:15px;overflow:hidden}.thumb{height:145px;background:repeating-conic-gradient(#182132 0 25%,#111827 0 50%) 50%/20px 20px;display:flex;align-items:center;justify-content:center}.thumb img{max-width:100%;max-height:100%;object-fit:contain}.info{padding:10px;font-size:12px}.name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.status{color:#8fa0bd;margin-top:5px}.ok{color:#53df9a}.err{color:#ff7777}.note{color:#8e9ab0;font-size:13px;margin-top:15px;line-height:1.5}
+</style>
+</head>
+<body>
+<div class="wrap">
+<section class="hero"><h1>ClearCut</h1><p>Fast, private, browser-based background remover — no AI and no uploads.</p></section>
+<div class="card">
+<label class="drop" id="drop">
+<input id="files" type="file" accept="image/*" multiple webkitdirectory directory>
+<strong>📁 Select a folder</strong>
+<span>Choose a folder containing up to 250 images, or drag a folder here.</span>
+</label>
+<div class="actions">
+<button id="choose">Choose Folder</button>
+<button id="process" disabled>Remove Backgrounds</button>
+<button id="zip" disabled>Download ZIP</button>
+<button class="secondary" id="clear">Clear</button>
+</div>
+<div class="stats"><span id="count">0 images</span><span id="progressText">0 / 0</span></div>
+<div class="bar"><div class="fill" id="fill"></div></div>
+<div class="grid" id="grid"></div>
+<div class="note">This non-AI version uses a browser color/edge-removal method. It works best when the background is reasonably uniform. Nothing is uploaded to a server.</div>
+</div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script>
+const $=id=>document.getElementById(id), input=$("files"), drop=$("drop"), grid=$("grid");
+let files=[], results=[], running=false;
+$("choose").onclick=()=>input.click();
+input.onchange=()=>loadFiles([...input.files]);
+["dragenter","dragover"].forEach(e=>drop.addEventListener(e,x=>{x.preventDefault();drop.classList.add("drag")}));
+["dragleave","drop"].forEach(e=>drop.addEventListener(e,x=>{x.preventDefault();drop.classList.remove("drag")}));
+drop.addEventListener("drop",e=>loadFiles([...e.dataTransfer.files].filter(f=>f.type.startsWith("image/"))));
+function loadFiles(list){
+ if(running)return;
+ files=list.filter(f=>f.type.startsWith("image/")).slice(0,250);
+ results=[]; grid.innerHTML="";
+ files.forEach((f,i)=>{
+  const d=document.createElement("div");d.className="item";d.innerHTML=`<div class="thumb"><img src="${URL.createObjectURL(f)}"></div><div class="info"><div class="name">${i+1}. ${esc(f.name)}</div><div class="status" id="s${i}">Waiting</div></div>`;grid.appendChild(d);
+ });
+ $("count").textContent=`${files.length} image${files.length===1?"":"s"}`;
+ $("progressText").textContent=`0 / ${files.length}`;$("fill").style.width="0%";
+ $("process").disabled=!files.length;$("zip").disabled=true;
+}
+function esc(s){return s.replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+$("clear").onclick=()=>{if(running)return;files=[];results=[];grid.innerHTML="";input.value="";$("count").textContent="0 images";$("progressText").textContent="0 / 0";$("fill").style.width="0%";$("process").disabled=true;$("zip").disabled=true};
+$("process").onclick=async()=>{if(!files.length||running)return;running=true;$("process").disabled=true;results=[];
+ let done=0;
+ // Small batches keep the browser responsive on 8GB machines.
+ const batch=6;
+ for(let start=0;start<files.length;start+=batch){
+  const part=files.slice(start,start+batch);
+  const out=await Promise.all(part.map((f,j)=>removeBg(f,start+j).catch(e=>({error:e}))));
+  results.push(...out);done+=part.length;$("progressText").textContent=`${done} / ${files.length}`;$("fill").style.width=(done/files.length*100)+"%";
+  await new Promise(r=>setTimeout(r,0));
+ }
+ running=false;$("zip").disabled=!results.some(x=>x&&x.blob);$("process").disabled=false;
+};
+async function removeBg(file,i){
+ const st=$("s"+i);st.textContent="Processing…";
+ const bmp=await createImageBitmap(file);
+ const max=1600, scale=Math.min(1,max/Math.max(bmp.width,bmp.height));
+ const w=Math.max(1,Math.round(bmp.width*scale)),h=Math.max(1,Math.round(bmp.height*scale));
+ const c=document.createElement("canvas");c.width=w;c.height=h;const ctx=c.getContext("2d",{willReadFrequently:true});
+ ctx.drawImage(bmp,0,0,w,h);bmp.close();
+ const im=ctx.getImageData(0,0,w,h), d=im.data;
+ // Estimate background from the four corners and remove pixels close to it.
+ const pts=[[0,0],[w-1,0],[0,h-1],[w-1,h-1]];
+ let br=0,bg=0,bb=0;for(const [x,y] of pts){let k=(y*w+x)*4;br+=d[k];bg+=d[k+1];bb+=d[k+2]}br/=4;bg/=4;bb/=4;
+ const tol=52;
+ for(let y=0;y<h;y++)for(let x=0;x<w;x++){let k=(y*w+x)*4;let dr=d[k]-br,dg=d[k+1]-bg,db=d[k+2]-bb;let dist=Math.sqrt(dr*dr+dg*dg+db*db);if(dist<tol)d[k+3]=0;else if(dist<tol+22)d[k+3]=Math.round((dist-tol)/22*255)}
+ ctx.putImageData(im,0,0);
+ const blob=await new Promise(r=>c.toBlob(r,"image/png"));
+ st.textContent=blob?"Done":"Failed";st.className="status "+(blob?"ok":"err");
+ return {blob,name:file.name.replace(/\.[^.]+$/,"")+".png",path:file.webkitRelativePath||file.name};
+}
+$("zip").onclick=async()=>{
+ if(!results.length)return;const zip=new JSZip();let n=0;
+ for(const r of results)if(r&&r.blob){zip.file(r.name,r.blob);n++}
+ $("zip").textContent="Creating ZIP…";$("zip").disabled=true;
+ const blob=await zip.generateAsync({type:"blob",compression:"STORE"});
+ const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="clearcut-results.zip";a.click();
+ setTimeout(()=>URL.revokeObjectURL(a.href),2000);$("zip").textContent="Download ZIP";$("zip").disabled=false;
+};
+</script>
+</body></html>
